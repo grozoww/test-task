@@ -1,0 +1,31 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors / IDEs
+.idea/
+*.iml
+.vscode/
+*.swp
+*~
+
+# Java / Gradle
+.gradle/
+build/
+
+# Node / frontend
+node_modules/
+dist/
+*.local
+
+# Logs
+*.log
+npm-debug.log*
+yarn-error.log*
+
+# Environment
+.env
+.env.*
+
+# Local tooling
+.claude/
