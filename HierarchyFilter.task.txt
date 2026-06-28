@@ -1,0 +1,10 @@
+The task:
+1. Read and understand the Hierarchy data structure described in the enclosed file.
+2. Implement filter() function.
+3. Implement more test cases.
+
+The task should take 30-90 minutes.
+
+When assessing the submission, we will pay attention to:
+- efficiency and clarity of the code,
+- the test cases.
