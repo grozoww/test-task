@@ -1,0 +1,76 @@
+.note {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  border-radius: 10px;
+  box-shadow: 0 6px 18px rgba(20, 20, 40, 0.16);
+  overflow: hidden;
+  will-change: transform;
+}
+
+.note[data-dragging='true'] {
+  box-shadow: 0 16px 32px rgba(20, 20, 40, 0.3);
+}
+
+.header {
+  height: 26px;
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  gap: 6px;
+  cursor: grab;
+  background: rgba(0, 0, 0, 0.08);
+  touch-action: none;
+}
+
+.header:active {
+  cursor: grabbing;
+}
+
+.swatches {
+  display: flex;
+  gap: 4px;
+}
+
+.swatch {
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid rgba(0, 0, 0, 0.25);
+  cursor: pointer;
+}
+
+.swatch[data-active='true'] {
+  outline: 2px solid rgba(0, 0, 0, 0.55);
+  outline-offset: 1px;
+}
+
+.text {
+  flex: 1;
+  width: 100%;
+  border: none;
+  outline: none;
+  resize: none;
+  background: transparent;
+  padding: 8px;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.4;
+  color: #2b2b33;
+}
+
+.text::placeholder {
+  color: rgba(0, 0, 0, 0.35);
+}
+
+.resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+  background: linear-gradient(135deg, transparent 50%, rgba(0, 0, 0, 0.3) 50%);
+  touch-action: none;
+}
