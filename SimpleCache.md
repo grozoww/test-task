@@ -109,9 +109,48 @@ class SimpleCache<K, V> {
 
 ## Priority
 
-Thread-safety is fine — `ConcurrentHashMap` plus an entry that never changes after it's created
-(a `data class` with `val` fields) means two threads reading and writing at the same time won't
-corrupt anything. The real problems are about memory and how it behaves under heavy load.
+Thread-safety is narrower than it looks. `ConcurrentHashMap` plus an entry that never changes
+after it's created (a `data class` with `val` fields) means the map itself won't get corrupted by
+concurrent reads and writes — but that's only structural safety. The cache's *semantics* still
+aren't atomic: check-then-act sequences like "read the entry, see it's expired, then remove and
+reload" are made of several separate operations, so two threads can interleave and step on each
+other (double-load a hot key, or delete a fresh value another thread just wrote). Single-map-op
+guarantees don't extend across those multi-step flows.
+
+To make a multi-step flow atomic you need explicit coordination. A `ReentrantLock` (or a per-key
+lock, e.g. a `ConcurrentHashMap<K, ReentrantLock>` or a striped-lock set) lets exactly one thread
+run the "expired? → remove → load → store" sequence for a given key while others wait, which is
+also how you get single-flight loading (#8). Watch the trade-offs: a single global lock serializes
+the whole cache and will choke under tens of threads doing thousands of reads/sec, so lock per key
+(not globally) and keep the loading call *outside* the map's own locks to avoid holding them across
+a slow DB call. This is fiddly to get right by hand — another reason to prefer a proven library.
+
+For example, `get()` under a lock makes the "read → expired? → remove" sequence atomic, so no other
+thread can observe or act on a half-updated state:
+
+```java
+public V get(K key) {
+    lock.lock();
+    try {
+        CacheEntry<V> entry = map.get(key);
+        if (entry == null) {
+            return null;
+        }
+        if (isExpired(entry)) {
+            map.remove(key); // lazy cleanup: expired -> delete right away
+            return null;
+        }
+        return entry.value;
+    } finally {
+        lock.unlock();   // always release, even if the body throws
+    }
+}
+```
+
+(Note this also fixes the LRU case where even a read mutates state — moving the entry to the
+most-recently-used position — which `ConcurrentHashMap` can't order at all.)
+
+The real problems are about memory and how it behaves under heavy load.
 
 Fix before going to production: add a size limit + cleanup (#3), stop the memory leak from expired
 entries (#7), and stop the reload flood on a popular key (#8). Being able to delete entries (#1) and
