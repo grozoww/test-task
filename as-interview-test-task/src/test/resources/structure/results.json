@@ -1,0 +1,16 @@
+{
+  "results": [
+    {
+      "employeeNumber": "W-2001",
+      "personal": { "fullName": "Grace Hopper" },
+      "work": { "emailAddress": "ghopper@navy.mil", "position": "Rear Admiral" },
+      "employmentStatus": "ACTIVE"
+    },
+    {
+      "employeeNumber": "W-2002",
+      "personal": { "fullName": "Katherine Johnson" },
+      "work": { "emailAddress": "kjohnson@navy.mil", "position": "Mathematician" },
+      "employmentStatus": "TERMINATED"
+    }
+  ]
+}

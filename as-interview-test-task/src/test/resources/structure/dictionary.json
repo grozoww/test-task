@@ -1,0 +1,26 @@
+{
+  "users": {
+    "U-8899": {
+      "displayName": "Michael Scott",
+      "mainEmail": "mscott@paper.biz",
+      "metadata": {
+        "custom_attributes": [
+          { "key": "role", "value": "Manager" },
+          { "key": "location", "value": "Scranton" }
+        ],
+        "account_suspended": false
+      }
+    },
+    "U-9900": {
+      "displayName": "Pam Beesly",
+      "mainEmail": "pam@paper.biz",
+      "metadata": {
+        "custom_attributes": [
+          { "key": "role", "value": "Admin" },
+          { "key": "location", "value": "Scranton" }
+        ],
+        "account_suspended": true
+      }
+    }
+  }
+}

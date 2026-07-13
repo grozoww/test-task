@@ -1,0 +1,34 @@
+package io.tempo.json.converter.dao;
+
+import org.springframework.stereotype.Component;
+
+@Component
+public class LegacySystemSourceDAO implements DataSourceDAO {
+
+    private static final String DATA = """
+            [
+              {
+                "user_id": 101,
+                "first_name": "Alice",
+                "last_name": "Smith",
+                "contact_email": "alice@company.net",
+                "job_title": "Senior Engineer",
+                "is_active": 1,
+                "joined_date": "2023-01-15"
+              },
+              {
+                "user_id": 102,
+                "first_name": "Bob",
+                "last_name": "Jones",
+                "contact_email": "bob@company.net",
+                "job_title": "Designer",
+                "is_active": 0,
+                "joined_date": "2022-11-20"
+              }
+            ]""";
+
+    @Override
+    public String getData() {
+        return DATA;
+    }
+}
