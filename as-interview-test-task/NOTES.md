@@ -55,10 +55,20 @@ test failed with an empty result. That failure is a symptom of the most serious 
    (`Executors.newVirtualThreadPerTaskExecutor()` - the right tool for blocking I/O-shaped calls on
    Java 21, and it stops competing with `ForkJoinPool.commonPool()`) with a configurable overall
    timeout: `employees.load-timeout`, default `5s`. Sources that don't respond in time are cancelled,
-   logged, and skipped. Covered by a test with a deliberately slow source.
+   logged, and skipped. The executor is released with `shutdownNow()` in a `finally` block rather
+   than try-with-resources, deliberately: `close()` waits for task termination, so a source that
+   survives cancellation (non-interruptible I/O, a swallowed interrupt) would hold the caller far
+   past the timeout. `shutdownNow()` re-interrupts and returns immediately, abandoning such tasks to
+   their own virtual threads - the caller's wait is bounded by the timeout, full stop. Covered by
+   two tests: a slow-but-interruptible source, and a source that ignores cancellation entirely
+   (the call must still return at the timeout, not when the source finally gives up). Cancellation
+   only abandons a stuck task, it can't stop the underlying I/O - real source clients need real
+   request deadlines (see next steps).
 
 8. **Payload logging.** Mappers printed entire payloads to stderr on failure - employee PII in logs.
    Error messages now describe the *structure* (top-level field names, node type), never field values.
+   One deliberate exception: the same-id conflict warning (see key decisions) logs the employee *id* -
+   it's the lookup key an operator needs to investigate; names, emails and roles still never appear.
 
 ### Design / maintainability
 
@@ -84,7 +94,7 @@ test failed with an empty result. That failure is a symptom of the most serious 
     ignore any `spring.jackson.*` properties. Verified by the integration test.
 
 13. **`pom.xml` cleanup.** Removed version pins for everything the Boot parent already manages
-    (starters, Jackson, Lombok, Mockito, both plugins - Lombok's annotation-processor path now uses
+    (starters, Jackson, Lombok, both plugins - Lombok's annotation-processor path now uses
     `${lombok.version}` from the parent) and deleted the empty `<licenses>/<developers>/<scm>`
     scaffolding. One less way to drift from the BOM on upgrades.
 
@@ -92,18 +102,30 @@ test failed with an empty result. That failure is a symptom of the most serious 
 
 - Mapper tests now parse once and call `map(JsonNode)`; each mapper has an explicit `supports(...)`
   truth table, plus targeted tests for the active-flag rules (they encode business decisions).
-- Router tests are plain Mockito unit tests instead of booting the full Spring context, and now cover
+- Router tests are plain unit tests instead of booting the full Spring context, and now cover
   the two previously untested paths: *no mapper supports the payload* and *payload isn't JSON*.
 - Load-service tests cover: aggregation across sources (with deterministic ordering),
-  de-duplication, per-source failure isolation (unreachable source + unroutable payload),
-  all-sources-failing, timeout, and the 100-source concurrency test (kept, minus the `println` noise).
+  de-duplication, same-id conflicts (both records kept **and** the warning asserted via
+  `OutputCaptureExtension`), per-source failure isolation (unreachable source + unroutable payload),
+  all-sources-failing, timeout, a source that ignores cancellation (the call still returns at the
+  timeout), and the 100-source concurrency test (kept, minus the `println` noise).
+- **Mockito is gone.** Every mocked collaborator was a one- or two-method interface, so the mocks
+  became lambdas (`DataSourceDAO`, which the tests read better for) and two tiny hand-rolled fakes.
+  That also fixed a build smell: with Mockito merely on the classpath, spring-test's Mockito
+  integration makes it self-attach its Java agent during every `@SpringBootTest` run, and current
+  JDKs warn that dynamically loaded agents will be disallowed by default in a future release.
+  Rather than wiring the agent into Surefire for a library nothing uses,
+  `mockito-core`/`mockito-junit-jupiter` are excluded from the test starter - the test log is now
+  free of the self-attach and dynamic-agent warnings. (If mocking earns its way back in, the right
+  move is Mockito's documented `-javaagent` Surefire setup, not silent self-attachment.)
 - New **end-to-end integration test**: the real context loads, and the default data of all five
   sources flows through routing and mapping into the combined result. This single test would have
   caught bugs #1, #2 and #3.
 - Test resources load from the classpath instead of `Path.of("src/test/resources/...")`, which breaks
   when the working directory isn't the module root.
 
-Result: 74 tests, green. `./mvnw package` + running the jar verified separately.
+Result: 76 tests, green - with a warning-free test log. `./mvnw package` + running the jar verified
+separately.
 
 ## Part 2 - the `results` source
 
@@ -124,9 +146,13 @@ Result: 74 tests, green. `./mvnw package` + running the jar verified separately.
 - **De-duplication by full value equality**, not by id. It only removes byte-identical records, so it
   can't destroy information. Merging *conflicting* records for the same person (same id, different
   role across systems) is a business decision that needs an owner, not something to invent silently.
+  Until that owner decides, the conflict must not be *invisible* either: the load service detects
+  same-id records that differ in other fields and logs a warning per id, keeping all of them. The
+  decision itself is parked under next steps, explicitly.
 - **One overall timeout** (`invokeAll` semantics) rather than per-source deadlines: simpler, and it
-  bounds the caller's total wait, which is usually the requirement. Per-source budgets are easy to add
-  if sources get real SLAs.
+  bounds the caller's total wait, which is usually the requirement - and the bound holds even against
+  sources that ignore cancellation (see issue 7). Per-source budgets are easy to add if sources get
+  real SLAs.
 - **Strictness moved to the edges.** Structure errors throw (visible per source in logs); missing
   *fields* inside a recognized structure map to `null`/inactive. That mirrors reality: absent data is
   normal, unrecognized shapes mean something changed upstream and must not be guessed at.
@@ -141,7 +167,14 @@ Result: 74 tests, green. `./mvnw package` + running the jar verified separately.
    (ordering, pagination, error shape).
 2. **Completeness metadata.** Return sources-succeeded/failed alongside the list (or at least metrics)
    so "partial result" is observable by callers, not only in logs.
-3. **Real DAO implementations.** The in-memory constants stand in for HTTP clients; retries/backoff
-   and per-source timeouts belong there once they exist.
-4. **Schema validation per source** (fail loudly on contract drift instead of `null`-ing fields), if
+3. **A merge policy for same-id records.** Two systems can return the same employee id with different
+   fields; today both records survive and a warning names the id. Whether such records merge - and
+   which source wins per field, or whether one system is authoritative - is a product decision that
+   needs an owner. The code deliberately surfaces the conflict instead of guessing; this is the first
+   question I'd bring to that owner.
+4. **Real DAO implementations.** The in-memory constants stand in for HTTP clients; retries/backoff
+   and, above all, **real per-request deadlines** belong there once they exist. The load service can
+   bound how long the *caller* waits, but cancelling a stuck task only abandons it - nothing short of
+   a client-level timeout makes the underlying I/O actually stop.
+5. **Schema validation per source** (fail loudly on contract drift instead of `null`-ing fields), if
    the business prefers strictness to tolerance.

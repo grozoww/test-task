@@ -6,26 +6,24 @@ import io.tempo.json.converter.service.employee.map.MapRouterService;
 import io.tempo.json.converter.service.employee.map.UnsupportedJsonStructureException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
-@ExtendWith(MockitoExtension.class)
 class ConcurrentEmployeeDataLoadServiceTest {
 
     private static final Duration TEST_TIMEOUT = Duration.ofSeconds(5);
 
-    @Mock
-    private MapRouterService<Employee> mapRouterService;
+    private final StubMapRouter mapRouterService = new StubMapRouter();
 
     @Test
     void getAllEmployees_shouldCombineEmployeesFromAllSources_inSourceOrder() {
@@ -34,18 +32,17 @@ class ConcurrentEmployeeDataLoadServiceTest {
         Employee thirdEmployee = employee("U-1");
         Employee fourthEmployee = employee("U-2");
 
-        DataSourceDAO firstSource = sourceReturning("firstSourceJson");
-        DataSourceDAO secondSource = sourceReturning("secondSourceJson");
-        DataSourceDAO thirdSource = sourceReturning("thirdSourceJson");
-        DataSourceDAO fourthSource = sourceReturning("fourthSourceJson");
+        mapRouterService.route("firstSourceJson", firstEmployee, secondEmployee);
+        mapRouterService.route("secondSourceJson", thirdEmployee);
+        mapRouterService.route("thirdSourceJson", fourthEmployee);
+        mapRouterService.route("fourthSourceJson");
 
-        when(mapRouterService.map("firstSourceJson")).thenReturn(List.of(firstEmployee, secondEmployee));
-        when(mapRouterService.map("secondSourceJson")).thenReturn(List.of(thirdEmployee));
-        when(mapRouterService.map("thirdSourceJson")).thenReturn(List.of(fourthEmployee));
-        when(mapRouterService.map("fourthSourceJson")).thenReturn(List.of());
-
-        List<Employee> actualResult =
-                loadService(TEST_TIMEOUT, firstSource, secondSource, thirdSource, fourthSource).getAllEmployees();
+        List<Employee> actualResult = loadService(TEST_TIMEOUT,
+                sourceReturning("firstSourceJson"),
+                sourceReturning("secondSourceJson"),
+                sourceReturning("thirdSourceJson"),
+                sourceReturning("fourthSourceJson")
+        ).getAllEmployees();
 
         assertThat(actualResult).containsExactly(firstEmployee, secondEmployee, thirdEmployee, fourthEmployee);
     }
@@ -56,30 +53,47 @@ class ConcurrentEmployeeDataLoadServiceTest {
         Employee duplicateOfFirstEmployee = employee("U-1");
         Employee secondEmployee = employee("U-2");
 
-        DataSourceDAO firstSource = sourceReturning("firstSourceJson");
-        DataSourceDAO secondSource = sourceReturning("secondSourceJson");
+        mapRouterService.route("firstSourceJson", firstEmployee);
+        mapRouterService.route("secondSourceJson", duplicateOfFirstEmployee, secondEmployee);
 
-        when(mapRouterService.map("firstSourceJson")).thenReturn(List.of(firstEmployee));
-        when(mapRouterService.map("secondSourceJson")).thenReturn(List.of(duplicateOfFirstEmployee, secondEmployee));
-
-        List<Employee> actualResult = loadService(TEST_TIMEOUT, firstSource, secondSource).getAllEmployees();
+        List<Employee> actualResult = loadService(TEST_TIMEOUT,
+                sourceReturning("firstSourceJson"),
+                sourceReturning("secondSourceJson")
+        ).getAllEmployees();
 
         assertThat(actualResult).containsExactly(firstEmployee, secondEmployee);
+    }
+
+    @Test
+    @ExtendWith(OutputCaptureExtension.class)
+    void getAllEmployees_shouldKeepBothRecords_andWarn_whenSourcesConflictOnSameId(CapturedOutput output) {
+        Employee employeeFromFirstSystem = Employee.builder().id("U-1").role("Engineer").build();
+        Employee sameIdWithDifferentRole = Employee.builder().id("U-1").role("Manager").build();
+
+        mapRouterService.route("firstSourceJson", employeeFromFirstSystem);
+        mapRouterService.route("secondSourceJson", sameIdWithDifferentRole);
+
+        List<Employee> actualResult = loadService(TEST_TIMEOUT,
+                sourceReturning("firstSourceJson"),
+                sourceReturning("secondSourceJson")
+        ).getAllEmployees();
+
+        assertThat(actualResult).containsExactly(employeeFromFirstSystem, sameIdWithDifferentRole);
+        assertThat(output).contains("Employee id U-1 maps to 2 records with conflicting fields");
     }
 
     @Test
     void getAllEmployees_shouldSkipFailingSources_andKeepHealthyOnes() {
         Employee expectedEmployee = employee("1");
 
-        DataSourceDAO unreachableSource = mock(DataSourceDAO.class);
-        when(unreachableSource.getData()).thenThrow(new IllegalStateException("source is down"));
-
+        DataSourceDAO unreachableSource = () -> {
+            throw new IllegalStateException("source is down");
+        };
+        // "unroutableJson" is not registered with the router, so mapping it throws
         DataSourceDAO unroutableSource = sourceReturning("unroutableJson");
-        when(mapRouterService.map("unroutableJson"))
-                .thenThrow(new UnsupportedJsonStructureException("unknown structure"));
 
         DataSourceDAO healthySource = sourceReturning("healthyJson");
-        when(mapRouterService.map("healthyJson")).thenReturn(List.of(expectedEmployee));
+        mapRouterService.route("healthyJson", expectedEmployee);
 
         List<Employee> actualResult =
                 loadService(TEST_TIMEOUT, unreachableSource, unroutableSource, healthySource).getAllEmployees();
@@ -89,8 +103,9 @@ class ConcurrentEmployeeDataLoadServiceTest {
 
     @Test
     void getAllEmployees_shouldReturnEmptyList_whenAllSourcesFail() {
-        DataSourceDAO unreachableSource = mock(DataSourceDAO.class);
-        when(unreachableSource.getData()).thenThrow(new IllegalStateException("source is down"));
+        DataSourceDAO unreachableSource = () -> {
+            throw new IllegalStateException("source is down");
+        };
 
         List<Employee> actualResult = loadService(TEST_TIMEOUT, unreachableSource).getAllEmployees();
 
@@ -101,23 +116,32 @@ class ConcurrentEmployeeDataLoadServiceTest {
     void getAllEmployees_shouldSkipSources_thatDoNotRespondWithinTimeout() {
         Employee expectedEmployee = employee("1");
 
-        DataSourceDAO slowSource = mock(DataSourceDAO.class);
-        when(slowSource.getData()).thenAnswer(invocation -> {
-            try {
-                TimeUnit.SECONDS.sleep(5);
-            } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-            }
-            return "slowSourceJson";
-        });
-
+        DataSourceDAO slowSource = sourceReturningAfter("slowSourceJson", Duration.ofSeconds(5));
         DataSourceDAO fastSource = sourceReturning("fastSourceJson");
-        when(mapRouterService.map("fastSourceJson")).thenReturn(List.of(expectedEmployee));
+        mapRouterService.route("fastSourceJson", expectedEmployee);
 
         List<Employee> actualResult =
                 loadService(Duration.ofMillis(300), slowSource, fastSource).getAllEmployees();
 
         assertThat(actualResult).containsExactly(expectedEmployee);
+    }
+
+    @Test
+    void getAllEmployees_shouldNotHoldCaller_whenSourceIgnoresCancellation() {
+        Employee expectedEmployee = employee("1");
+
+        DataSourceDAO stuckSource = uninterruptibleSourceBlockingFor(Duration.ofSeconds(10));
+        DataSourceDAO fastSource = sourceReturning("fastSourceJson");
+        mapRouterService.route("fastSourceJson", expectedEmployee);
+
+        long startNanos = System.nanoTime();
+        List<Employee> actualResult =
+                loadService(Duration.ofMillis(300), stuckSource, fastSource).getAllEmployees();
+        Duration elapsed = Duration.ofNanos(System.nanoTime() - startNanos);
+
+        assertThat(actualResult).containsExactly(expectedEmployee);
+        // far below the 10s the stuck source keeps blocking after cancellation
+        assertThat(elapsed).isLessThan(Duration.ofSeconds(5));
     }
 
     @Test
@@ -130,14 +154,8 @@ class ConcurrentEmployeeDataLoadServiceTest {
             Employee employee = employee(String.valueOf(i));
             expectedResult.add(employee);
 
-            DataSourceDAO source = mock(DataSourceDAO.class);
-            when(source.getData()).thenAnswer(invocation -> {
-                TimeUnit.MILLISECONDS.sleep(ThreadLocalRandom.current().nextInt(100));
-                return json;
-            });
-            sources.add(source);
-
-            when(mapRouterService.map(json)).thenReturn(List.of(employee));
+            sources.add(sourceReturningAfter(json, Duration.ofMillis(ThreadLocalRandom.current().nextInt(100))));
+            mapRouterService.route(json, employee);
         }
 
         List<Employee> actualResult =
@@ -150,13 +168,59 @@ class ConcurrentEmployeeDataLoadServiceTest {
         return new ConcurrentEmployeeDataLoadService(mapRouterService, List.of(sources), timeout);
     }
 
-    private DataSourceDAO sourceReturning(String json) {
-        DataSourceDAO source = mock(DataSourceDAO.class);
-        when(source.getData()).thenReturn(json);
-        return source;
+    private static DataSourceDAO sourceReturning(String json) {
+        return () -> json;
+    }
+
+    private static DataSourceDAO sourceReturningAfter(String json, Duration delay) {
+        return () -> {
+            try {
+                TimeUnit.MILLISECONDS.sleep(delay.toMillis());
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+            return json;
+        };
+    }
+
+    private static DataSourceDAO uninterruptibleSourceBlockingFor(Duration blockFor) {
+        return () -> {
+            long deadlineNanos = System.nanoTime() + blockFor.toNanos();
+            while (System.nanoTime() < deadlineNanos) {
+                try {
+                    TimeUnit.MILLISECONDS.sleep(100);
+                } catch (InterruptedException ignored) {
+                    // simulates non-interruptible I/O: cancellation does not unblock this source
+                }
+            }
+            return "uninterruptibleSourceJson";
+        };
     }
 
     private static Employee employee(String id) {
         return Employee.builder().id(id).build();
+    }
+
+    /**
+     * Hand-rolled router stub: {@link #map} returns whatever {@link #route} registered for the
+     * payload and throws {@link UnsupportedJsonStructureException} for anything unregistered -
+     * the same contract as the real router facing an unknown structure.
+     */
+    private static final class StubMapRouter implements MapRouterService<Employee> {
+
+        private final Map<String, List<Employee>> routes = new HashMap<>();
+
+        void route(String json, Employee... employees) {
+            routes.put(json, List.of(employees));
+        }
+
+        @Override
+        public List<Employee> map(String json) {
+            List<Employee> employees = routes.get(json);
+            if (employees == null) {
+                throw new UnsupportedJsonStructureException("no registered route for payload " + json);
+            }
+            return employees;
+        }
     }
 }
